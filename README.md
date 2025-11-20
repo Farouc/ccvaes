@@ -1,13 +1,13 @@
 # CCVAE : Characteristic Capturing Variational Autoencoder
 
-[cite\_start]Ce projet est une implémentation **PyTorch** du modèle **CCVAE**, basée sur le papier de recherche *"Capturing Label Characteristics in VAEs"* (Joy et al., ICLR 2021)[cite: 1, 11].
+Ce projet est une implémentation **PyTorch** du modèle **CCVAE**, basée sur le papier de recherche *"Capturing Label Characteristics in VAEs"* (Joy et al., ICLR 2021)[cite: 1, 11].
 
 L'objectif est de structurer l'espace latent d'un VAE pour séparer le **style** (fond, forme globale) des **caractéristiques spécifiques** (attributs étiquetés comme la couleur de cheveux, les lunettes, etc.), permettant ainsi des manipulations précises de l'image.
 
 ## 📂 Structure du Projet
 
-  * [cite\_start]`model.py` : Architecture du CCVAE (Encodeur, Décodeur, Classifieur Latent)[cite: 11, 14].
-  * [cite\_start]`loss.py` : Fonction de coût spécifique (Reconstruction + KL Divergence + Perte de supervision)[cite: 153, 154].
+  * `model.py` : Architecture du CCVAE (Encodeur, Décodeur, Classifieur Latent)[cite: 11, 14].
+  * `loss.py` : Fonction de coût spécifique (Reconstruction + KL Divergence + Perte de supervision)[cite: 153, 154].
   * `dataset.py` : Dataloader personnalisé pour le **Google Cartoon Set**. Gère la normalisation des labels.
   * `train_cartoon.py` : Script d'entraînement principal.
   * `visualize.py` : Script de génération de "Latent Traversals" (modification progressive d'un attribut).
@@ -64,15 +64,16 @@ Contrairement à l'approche classique de classification (Cross-Entropy) pour les
 
 ### Architecture Latente
 
-[cite\_start]L'espace latent $z$ est divisé en deux parties[cite: 112]:
+L'espace latent $z$ est divisé en deux parties[cite: 112]:
 
   * **$z_c$ (Characteristic Latents)** : Dimensions supervisées, chacune dédiée à un attribut spécifique du dataset.
   * **$z_{\setminus c}$ (Contextual Latents)** : Dimensions non-supervisées capturant le reste de l'information (style, fond).
 
 ## 👥 Auteurs
 
-  * [Ton Prénom] [Ton Nom]
-  * [Prénom Partenaire] [Nom Partenaire]
+  * Farouk YARTAOU
+  * Rida ASSALOUH
+  * El Mehdi NEZAHI
 
 -----
 
