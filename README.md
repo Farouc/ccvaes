@@ -24,7 +24,7 @@ L'objectif est de structurer l'espace latent d'un VAE pour séparer le **style**
 
 Nous utilisons une version réduite (10k images) du Google Cartoon Set pour démontrer la capacité du modèle à capturer des caractéristiques visuelles variées.
 
-1.  Téléchargez le dataset (version 10k).
+1.  Téléchargez le dataset (version 10k): https://google.github.io/cartoonset/download.html
 2.  Placez le dossier décompressé dans `cartoonset10k/`.
 3.  L'arborescence doit ressembler à : `./cartoonset10k/cartoonset10k/*.png`
 
