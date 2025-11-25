@@ -158,7 +158,7 @@ if __name__ == "__main__":
     
     # Chemins vers des images de test (à changer)
     test_img_1 = "./cartoonset10k/cartoonset10k/cs10188651804540743.png"
-    test_img_2 = "./cartoonset10k/cartoonset10k/cs1048486361028912.png" # Supposons une autre couleur
+    test_img_2 = "./cartoonset10k/cartoonset10k/cs1048486361028912.png"
     
     print("--- 1. Test Classification ---")
     try:
