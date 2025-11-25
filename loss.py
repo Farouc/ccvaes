@@ -1,169 +1,294 @@
-# loss.py
+# loss_paper.py
+
+import math
 import torch
 import torch.nn.functional as F
 
+LOG_2PI = math.log(2.0 * math.pi)
 
-# ==============================================================
-#  CCVAE SUPERVISED LOSS
-#  (Utilisée quand x est accompagné de son label y)
-# ==============================================================
 
-def ccvae_loss_supervised(
-    recon_x, x,
-    mu, logvar,
-    y_logits, y_true,
-    prior_mu, prior_logvar,
-    z_c_dim,
-    recon_type="mse"
-):
+def log_normal_diag(z, mu, logvar):
     """
-    CCVAE supervised loss for a single categorical attribute.
-    
-    Components:
-        1. Reconstruction loss
-        2. KL(z_not_c || N(0,I))
-        3. KL(z_c || p(z_c | y))
-        4. Classification loss (CrossEntropy)
+    Log densité d'une gaussienne diagonale N(mu, diag(exp(logvar))).
+    Retourne un tenseur (B,) si on somme sur la dimension latente.
     """
+    return -0.5 * torch.sum(
+        LOG_2PI + logvar + (z - mu) ** 2 / logvar.exp(),
+        dim=-1
+    )
 
-    # ----------------------------------------------------------
-    # 1. Reconstruction loss p(x|z)
-    # ----------------------------------------------------------
+
+def log_px_given_z(x, recon_x, recon_type="mse"):
+    """
+    Approximation de log p(x|z) (up to constant).
+    Retourne un tenseur (B,).
+    """
     if recon_type == "bce":
-        recon_loss = F.binary_cross_entropy(recon_x, x, reduction="sum")
+        per_elem = F.binary_cross_entropy(recon_x, x, reduction="none")
     else:
-        recon_loss = F.mse_loss(recon_x, x, reduction="sum")
+        # -||x - recon_x||^2, les constantes sont ignorées
+        per_elem = (recon_x - x) ** 2
 
-    # ----------------------------------------------------------
-    # Split latent space
-    # ----------------------------------------------------------
-    mu_c      = mu[:, :z_c_dim]
-    logvar_c  = logvar[:, :z_c_dim]
-    mu_not_c  = mu[:, z_c_dim:]
-    logvar_not_c = logvar[:, z_c_dim:]
-
-    # ----------------------------------------------------------
-    # 2. KL divergence for z_not_c against N(0, I)
-    # ----------------------------------------------------------
-    kl_not_c = -0.5 * torch.sum(
-        1 + logvar_not_c - mu_not_c.pow(2) - logvar_not_c.exp()
-    )
-
-    # ----------------------------------------------------------
-    # 3. KL divergence for z_c against conditional prior
-    #    KL(q(z_c|x) || p(z_c | y))
-    # ----------------------------------------------------------
-    var_c     = logvar_c.exp()
-    var_prior = prior_logvar.exp()
-
-    kl_c = 0.5 * torch.sum(
-        prior_logvar - logvar_c +
-        (var_c + (mu_c - prior_mu).pow(2)) / var_prior
-        - 1
-    )
-
-    # ----------------------------------------------------------
-    # 4. Classification loss q(y|z_c)
-    # ----------------------------------------------------------
-    classif_loss = F.cross_entropy(y_logits, y_true, reduction="sum")
-
-    # ----------------------------------------------------------
-    # Total supervised loss
-    # ----------------------------------------------------------
-    total_loss = recon_loss + kl_not_c + kl_c + classif_loss
-
-    return total_loss, recon_loss, kl_not_c, kl_c, classif_loss
-
+    return -per_elem.view(per_elem.size(0), -1).sum(dim=1)
 
 
 # ==============================================================
-#  CCVAE UNSUPERVISED LOSS
-#  (Utilisée quand x est SANS label)
+#  CCVAE SUPERVISED LOSS — équation (4)
 # ==============================================================
 
-def ccvae_loss_unsupervised(
-    recon_x, x,
-    mu, logvar,
-    z_c_dim,
-    recon_type="mse"
+def ccvae_loss_supervised_paper(
+    model,
+    x,          # (B, 3, 64, 64)
+    y,          # (B,) entiers hair_color
+    K=10,
+    recon_type="mse",
+    uniform_class_prior=True,
 ):
     """
-    CCVAE unsupervised loss.
-    
-    Components:
-        1. Reconstruction loss
-        2. KL(z || N(0,I))
-    
-    No classification, no conditional prior.
+    Implémente l'équation (4) du papier CCVAE pour un batch supervisé (x, y).
+
+    L_CCvae(x,y) = E_{q(z|x)}[
+        ( q(y|z_c) / q(y|x) ) *
+        log ( p(x|z)p(z|y) / ( q(y|z_c) q(z|x) ) )
+    ] + log q(y|x) + log p(y).
+
+    On approxime par Monte Carlo avec K échantillons z ~ q(z|x).
+
+    Retourne:
+        loss (scalaire à minimiser = -ELBO),
+        stats (dict) pour logging.
     """
 
+    device = x.device
+    B = x.size(0)
+    D = model.total_z_dim
+    z_c_dim = model.z_c_dim
+
     # ----------------------------------------------------------
-    # 1. Reconstruction loss p(x|z)
+    # 1. q(z|x) = N(mu, diag(exp(logvar)))
     # ----------------------------------------------------------
-    if recon_type == "bce":
-        recon_loss = F.binary_cross_entropy(recon_x, x, reduction="sum")
+    h = model.encoder_conv(x)        # (B, 1024)
+    mu = model.fc_mu(h)              # (B, D)
+    logvar = model.fc_logvar(h)      # (B, D)
+
+    # p(z_c|y) : prior conditionnel
+    y_onehot = F.one_hot(y, num_classes=model.num_classes).float()
+    y_embed = model.y_embedding(y_onehot)           # (B, d_embed)
+    prior_mu = model.cond_prior_mu(y_embed)         # (B, z_c_dim)
+    prior_logvar = model.cond_prior_logvar(y_embed) # (B, z_c_dim)
+
+    # Accumulation des termes sur K samples
+    log_p_xz_list = []
+    log_p_zy_list = []
+    log_qz_x_list = []
+    log_qy_zc_list = []
+    qy_zc_list = []
+
+    for k in range(K):
+        # -----------------------------
+        # 2. échantillonnage z ~ q(z|x)
+        # -----------------------------
+        eps = torch.randn_like(mu)
+        z = mu + eps * torch.exp(0.5 * logvar)   # (B, D)
+
+        z_c = z[:, :z_c_dim]
+        z_not_c = z[:, z_c_dim:]
+
+        # -----------------------------
+        # 3. log p(x|z)
+        # -----------------------------
+        dec_in = model.decoder_input(z)          # (B, 64*4*4)
+        dec_in = dec_in.view(-1, 64, 4, 4)
+        recon_x = model.decoder_conv(dec_in)     # (B, 3, 64, 64)
+
+        log_p_xz = log_px_given_z(x, recon_x, recon_type)  # (B,)
+
+        # -----------------------------
+        # 4. log p(z|y) = log p(z_c|y) + log p(z_not_c)
+        # -----------------------------
+        log_p_zc_y = log_normal_diag(z_c, prior_mu, prior_logvar)  # (B,)
+
+        zero_mu = torch.zeros_like(z_not_c)
+        zero_logvar = torch.zeros_like(z_not_c)
+        log_p_znot = log_normal_diag(z_not_c, zero_mu, zero_logvar)  # (B,)
+
+        log_p_zy = log_p_zc_y + log_p_znot  # (B,)
+
+        # -----------------------------
+        # 5. log q(z|x)
+        # -----------------------------
+        log_qz_x = log_normal_diag(z, mu, logvar)  # (B,)
+
+        # -----------------------------
+        # 6. q(y|z_c)
+        # -----------------------------
+        logits = model.classifier(z_c)             # (B, num_classes)
+        log_probs = F.log_softmax(logits, dim=-1)  # (B, C)
+        log_qy_zc = log_probs.gather(1, y.view(-1, 1)).squeeze(1)  # (B,)
+        qy_zc = log_qy_zc.exp()                    # (B,)
+
+        # Store
+        log_p_xz_list.append(log_p_xz)
+        log_p_zy_list.append(log_p_zy)
+        log_qz_x_list.append(log_qz_x)
+        log_qy_zc_list.append(log_qy_zc)
+        qy_zc_list.append(qy_zc)
+
+    # ----------------------------------------------------------
+    # 7. Agrégation des K échantillons
+    # ----------------------------------------------------------
+    log_p_xz = torch.stack(log_p_xz_list, dim=0)    # (K, B)
+    log_p_zy = torch.stack(log_p_zy_list, dim=0)    # (K, B)
+    log_qz_x = torch.stack(log_qz_x_list, dim=0)    # (K, B)
+    log_qy_zc = torch.stack(log_qy_zc_list, dim=0)  # (K, B)
+    qy_zc = torch.stack(qy_zc_list, dim=0)          # (K, B)
+
+    # q(y|x) ≈ 1/K ∑_k q(y|z_c^(k))
+    q_y_x = qy_zc.mean(dim=0)                       # (B,)
+    log_q_y_x = torch.log(q_y_x + 1e-8)             # (B,)
+
+    # importance weights w_k = q(y|z_c^k) / q(y|x)
+    w = qy_zc / (q_y_x.unsqueeze(0) + 1e-8)         # (K, B)
+
+    # log [ p(x|z)p(z|y) / (q(y|z_c) q(z|x)) ]
+    inner = log_p_xz + log_p_zy - log_qz_x - log_qy_zc  # (K, B)
+
+    # E_{q(z|x)}[ w * inner ]
+    weighted_inner = (w * inner).mean(dim=0)        # (B,)
+
+    # log p(y) : si uniforme, constante → peut être ignorée
+    if uniform_class_prior:
+        log_p_y = 0.0
     else:
-        recon_loss = F.mse_loss(recon_x, x, reduction="sum")
+        # prior quelconque possible ici
+        log_p_y = 0.0
 
-    # ----------------------------------------------------------
-    # 2. KL divergence for FULL latent space against N(0,I)
-    # ----------------------------------------------------------
-    kl = -0.5 * torch.sum(
-        1 + logvar - mu.pow(2) - logvar.exp()
-    )
+    # L(x,y) = E[...] + log q(y|x) + log p(y)
+    L_xy = weighted_inner + log_q_y_x + log_p_y     # (B,)
 
-    total_loss = recon_loss + kl
+    elbo = L_xy.mean()
+    loss = -elbo
 
-    return total_loss, recon_loss, kl
+    # Stats pour logging
+    with torch.no_grad():
+        stats = dict(
+            elbo=elbo.item(),
+            loss=loss.item(),
+            log_p_xz=log_p_xz.mean().item(),
+            log_p_zy=log_p_zy.mean().item(),
+            log_qz_x=log_qz_x.mean().item(),
+            log_qy_zc=log_qy_zc.mean().item(),
+            log_q_y_x=log_q_y_x.mean().item(),
+        )
 
+    return loss, stats
 
 
 # ==============================================================
-#  OPTIONAL: WRAPPER TO COMBINE SUPERVISED + UNSUPERVISED LOSS
+#  CCVAE UNSUPERVISED LOSS — équation (5)
 # ==============================================================
 
-def ccvae_loss_mixed(
-    outputs_labeled,
-    outputs_unlabeled,
-    y_true,
-    z_c_dim,
-    lambda_unsup=1.0,
-    recon_type="mse"
+def ccvae_loss_unsupervised_paper(
+    model,
+    x,          # (B, 3, 64, 64)
+    K=10,
+    recon_type="mse",
+    uniform_class_prior=True,
 ):
     """
-    Utility for combining supervised and unsupervised batches.
+    Implémente l'équation (5) du papier CCVAE pour un batch non-supervisé x.
 
-    Parameters:
-        outputs_labeled   = (recon_x_l, mu_l, logvar_l, y_logits_l, prior_mu_l, prior_logvar_l)
-        outputs_unlabeled = (recon_x_u, mu_u, logvar_u)
-        y_true            = labels for labeled batch
-        lambda_unsup      = scaling factor for unsupervised loss
+    L_CCvae(x) = E_{q(z|x) q(y|z_c)}[
+        log ( p(x|z)p(z|y)p(y) / (q(y|z_c) q(z|x)) )
+    ].
+
+    Approximation Monte Carlo avec K échantillons de (z, y).
     """
 
-    # Unpack labeled outputs
-    recon_l, mu_l, logvar_l, y_logits_l, prior_mu_l, prior_logvar_l = outputs_labeled
+    device = x.device
+    B = x.size(0)
+    D = model.total_z_dim
+    z_c_dim = model.z_c_dim
 
-    # Unpack unlabeled outputs
-    recon_u, mu_u, logvar_u = outputs_unlabeled
+    # q(z|x)
+    h = model.encoder_conv(x)
+    mu = model.fc_mu(h)          # (B, D)
+    logvar = model.fc_logvar(h)  # (B, D)
 
-    # Compute supervised loss
-    loss_sup, rec_sup, klnot_sup, klc_sup, cls_sup = ccvae_loss_supervised(
-        recon_l, recon_l,    # **FIXED BELOW**
-        mu_l, logvar_l,
-        y_logits_l, y_true,
-        prior_mu_l, prior_logvar_l,
-        z_c_dim=z_c_dim,
-        recon_type=recon_type
+    log_terms = []
+
+    for k in range(K):
+        # -----------------------------
+        # 1. z ~ q(z|x)
+        # -----------------------------
+        eps = torch.randn_like(mu)
+        z = mu + eps * torch.exp(0.5 * logvar)   # (B, D)
+
+        z_c = z[:, :z_c_dim]
+        z_not_c = z[:, z_c_dim:]
+
+        # -----------------------------
+        # 2. y ~ q(y|z_c)
+        # -----------------------------
+        logits = model.classifier(z_c)         # (B, C)
+        log_probs = F.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
+
+        y_sample = torch.multinomial(probs, num_samples=1).squeeze(1)  # (B,)
+        log_qy_zc = log_probs.gather(1, y_sample.view(-1, 1)).squeeze(1)  # (B,)
+
+        # -----------------------------
+        # 3. prior conditionnel p(z_c|y_sample)
+        # -----------------------------
+        y_onehot = F.one_hot(y_sample, num_classes=model.num_classes).float()
+        y_embed = model.y_embedding(y_onehot)
+        prior_mu = model.cond_prior_mu(y_embed)         # (B, z_c_dim)
+        prior_logvar = model.cond_prior_logvar(y_embed) # (B, z_c_dim)
+
+        # -----------------------------
+        # 4. log p(x|z)
+        # -----------------------------
+        dec_in = model.decoder_input(z)
+        dec_in = dec_in.view(-1, 64, 4, 4)
+        recon_x = model.decoder_conv(dec_in)
+
+        log_p_xz = log_px_given_z(x, recon_x, recon_type=recon_type)  # (B,)
+
+        # -----------------------------
+        # 5. log p(z|y) = log p(z_c|y) + log p(z_not_c)
+        # -----------------------------
+        log_p_zc_y = log_normal_diag(z_c, prior_mu, prior_logvar)  # (B,)
+        zero_mu = torch.zeros_like(z_not_c)
+        zero_logvar = torch.zeros_like(z_not_c)
+        log_p_znot = log_normal_diag(z_not_c, zero_mu, zero_logvar)  # (B,)
+        log_p_zy = log_p_zc_y + log_p_znot
+
+        # -----------------------------
+        # 6. log q(z|x)
+        # -----------------------------
+        log_qz_x = log_normal_diag(z, mu, logvar)  # (B,)
+
+        # -----------------------------
+        # 7. log [ p(x|z)p(z|y)p(y) / (q(y|z_c) q(z|x)) ]
+        # -----------------------------
+        if uniform_class_prior:
+            log_p_y = 0.0
+        else:
+            log_p_y = 0.0  # à adapter si prior non uniforme
+
+        inner = log_p_xz + log_p_zy + log_p_y - log_qy_zc - log_qz_x  # (B,)
+        log_terms.append(inner)
+
+    log_terms = torch.stack(log_terms, dim=0)  # (K, B)
+    L_x = log_terms.mean(dim=0)                # (B,)
+
+    elbo = L_x.mean()
+    loss = -elbo
+
+    stats = dict(
+        elbo=elbo.item(),
+        loss=loss.item(),
+        avg_inner=L_x.mean().item(),
     )
 
-    # Compute unsupervised loss
-    loss_unsup, rec_unsup, kl_unsup = ccvae_loss_unsupervised(
-        recon_u, recon_u,    # **FIXED BELOW**
-        mu_u, logvar_u,
-        z_c_dim=z_c_dim,
-        recon_type=recon_type
-    )
-
-    total = loss_sup + lambda_unsup * loss_unsup
-
-    return total
+    return loss, stats
