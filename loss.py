@@ -84,7 +84,7 @@ def ccvae_loss_supervised_paper(
     log_qy_zc_list = []
     qy_zc_list = []
 
-    for k in range(K):
+    for k in range(K): #on échantillonne K des vecteurs z liés à x
         # -----------------------------
         # 2. échantillonnage z ~ q(z|x)
         # -----------------------------
