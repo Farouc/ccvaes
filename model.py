@@ -2,22 +2,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class CCVAE(nn.Module):
-    def __init__(self, img_channels=3, z_c_dim=16, z_not_c_dim=32, num_classes=10):
+    def __init__(self, img_channels=3, z_c_dims=[16, 16], z_not_c_dim=32, num_classes_list=[10, 11]):
         """
-        num_classes = nombre de couleurs de cheveux dans le dataset (ex: 10)
+        Args:
+            z_c_dims (list): Liste des dimensions pour chaque sous-z_c. 
+                             Ex: [16, 16] si on veut 16 dims pour hair et 16 pour face.
+            num_classes_list (list): Liste du nombre de classes pour chaque attribut.
+                                     Ex: [10, 11] (10 couleurs cheveux, 11 couleurs visage).
         """
         super(CCVAE, self).__init__()
 
-        self.z_c_dim = z_c_dim
+        self.z_c_dims = z_c_dims
+        self.num_classes_list = num_classes_list
+        self.num_attributes = len(num_classes_list)
+        
+        # Dimensions totales
+        self.total_z_c_dim = sum(z_c_dims)
         self.z_not_c_dim = z_not_c_dim
-        self.total_z_dim = z_c_dim + z_not_c_dim
-        self.num_classes = num_classes
+        self.total_z_dim = self.total_z_c_dim + z_not_c_dim
 
         # --------------------------
-        # 1. ENCODER q(z|x)
+        # 1. ENCODER q(z|x) (Global)
         # --------------------------
+        # L'encodeur voit l'image entière et produit un gros vecteur latent
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(img_channels, 32, 4, 2, 1), nn.ReLU(),
             nn.Conv2d(32, 32, 4, 2, 1), nn.ReLU(),
@@ -26,11 +34,12 @@ class CCVAE(nn.Module):
             nn.Flatten()
         )
 
+        # Les têtes mu/logvar produisent TOUT (z_c1 + z_c2 + ... + z_not_c)
         self.fc_mu = nn.Linear(64 * 4 * 4, self.total_z_dim)
         self.fc_logvar = nn.Linear(64 * 4 * 4, self.total_z_dim)
 
         # --------------------------
-        # 2. DECODER p(x|z)
+        # 2. DECODER p(x|z) (Global)
         # --------------------------
         self.decoder_input = nn.Linear(self.total_z_dim, 64 * 4 * 4)
         self.decoder_conv = nn.Sequential(
@@ -42,57 +51,92 @@ class CCVAE(nn.Module):
         )
 
         # --------------------------
-        # 3. CLASSIFIER q(y|z_c)
-        #    prédiction hair_color
+        # 3. CLASSIFIERS & PRIORS (Spécifiques par attribut)
         # --------------------------
-        self.classifier = nn.Linear(z_c_dim, num_classes)
+        # On utilise ModuleList pour itérer dessus proprement
+        self.classifiers = nn.ModuleList()
+        self.priors_embedding = nn.ModuleList()
+        self.priors_mu = nn.ModuleList()
+        self.priors_logvar = nn.ModuleList()
 
-        # --------------------------
-        # 4. CONDITIONAL PRIOR p(z_c|y)
-        #    y_onehot → latent prior
-        # --------------------------
-        self.y_embedding = nn.Linear(num_classes, 32)  # projection du one-hot
-        self.cond_prior_mu = nn.Linear(32, z_c_dim)
-        self.cond_prior_logvar = nn.Linear(32, z_c_dim)
+        for dim_z, num_cls in zip(z_c_dims, num_classes_list):
+            # Classifieur : z_c_i -> logits_i
+            self.classifiers.append(nn.Linear(dim_z, num_cls))
+            
+            # Prior : y_i (onehot) -> embedding -> mu/logvar
+            # On projette le one-hot vers une couche cachée (ex: 32)
+            self.priors_embedding.append(nn.Linear(num_cls, 32)) 
+            self.priors_mu.append(nn.Linear(32, dim_z))
+            self.priors_logvar.append(nn.Linear(32, dim_z))
 
-    # --------------------------
-    # Reparameterization trick
-    # --------------------------
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    # --------------------------
-    # Forward pass complet
-    # --------------------------
     def forward(self, x, y=None):
-        # A. Encodeur
+        """
+        y: Tensor de shape (Batch, NumAttributes). Ex: [[4, 8], [2, 0], ...]
+        """
+        batch_size = x.size(0)
+
+        # --- A. Encodeur ---
         h = self.encoder_conv(x)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
-
-        # B. Sampling
         z = self.reparameterize(mu, logvar)
 
-        # C. Split
-        z_c = z[:, :self.z_c_dim]
+        # --- B. Découpage du latent (Slicing) ---
+        # On doit séparer [z_c1, z_c2, ..., z_not_c]
+        # On prépare les tailles des sections pour torch.split
+        split_sizes = self.z_c_dims + [self.z_not_c_dim]
+        z_parts = torch.split(z, split_sizes, dim=1)
+        
+        # Les parties z_c sont toutes sauf la dernière
+        z_c_list = z_parts[:-1] 
+        # z_not_c est la dernière partie
+        # z_not_c = z_parts[-1] 
 
-        # D. Reconstruction
+        # --- C. Classifieurs & Priors (Boucle sur les attributs) ---
+        y_logits_list = []
+        prior_mu_list = []
+        prior_logvar_list = []
+
+        # On a besoin des moyennes (mu) découpées aussi pour le classifieur (pas le sample z)
+        mu_parts = torch.split(mu, split_sizes, dim=1)
+        mu_c_list = mu_parts[:-1]
+
+        for i in range(self.num_attributes):
+            # 1. Classification : on prend le z_c_i correspondant (version moyenne mu)
+            logits = self.classifiers[i](mu_c_list[i])
+            y_logits_list.append(logits)
+
+            # 2. Prior p(z_c|y) si y est fourni
+            if y is not None:
+                # On récupère le label i pour tout le batch
+                y_i = y[:, i] # Shape (Batch,)
+                num_cls = self.num_classes_list[i]
+                
+                # One-hot
+                y_onehot = F.one_hot(y_i, num_classes=num_cls).float()
+                
+                # Reseau de Prior
+                embed = F.relu(self.priors_embedding[i](y_onehot))
+                p_mu = self.priors_mu[i](embed)
+                p_logvar = self.priors_logvar[i](embed)
+                
+                prior_mu_list.append(p_mu)
+                prior_logvar_list.append(p_logvar)
+            else:
+                prior_mu_list.append(None)
+                prior_logvar_list.append(None)
+
+        # --- D. Reconstruction ---
+        # Le décodeur prend tout le vecteur z concaténé (ce qui est déjà 'z' ici)
+        # Mais pour être sûr de la cohérence, on utilise z directement calculé plus haut
         dec_in = self.decoder_input(z)
         dec_in = dec_in.view(-1, 64, 4, 4)
         recon_x = self.decoder_conv(dec_in)
 
-        # E. Classifieur q(y|z_c)
-        mu_c = mu[:, :self.z_c_dim]
-        y_logits = self.classifier(mu_c)   # logits shape : (B, num_classes)
-
-        # F. Conditional prior p(z_c|y)
-        prior_mu, prior_logvar = None, None
-        if y is not None:
-            y_onehot = F.one_hot(y, num_classes=self.num_classes).float()
-            y_embed = self.y_embedding(y_onehot)
-            prior_mu = self.cond_prior_mu(y_embed)
-            prior_logvar = self.cond_prior_logvar(y_embed)
-
-        return recon_x, mu, logvar, y_logits, prior_mu, prior_logvar
+        # On retourne des LISTES pour les logits et les priors
+        return recon_x, mu, logvar, y_logits_list, prior_mu_list, prior_logvar_list
