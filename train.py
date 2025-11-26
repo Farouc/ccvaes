@@ -19,8 +19,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Hyperparamètres d'entraînement
 BATCH_SIZE = 32        # 32 est plus stable pour la convergence que 64 au début
 LR = 1e-4              # Learning rate standard pour VAE
-EPOCHS = 30
-LABELED_RATIO = 0.20   # 20% de données étiquetées
+EPOCHS = 70
+LABELED_RATIO = 0.5   # 20% de données étiquetées
 K_SAMPLES = 10         # Nombre d'échantillons MC (Importance Sampling)
 
 # Hyperparamètres de Loss
