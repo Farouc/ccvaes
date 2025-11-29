@@ -7,7 +7,7 @@ def loss_regression_paper(
     mu, logvar, 
     y_pred, y_true, 
     prior_mu, prior_logvar, 
-    gamma=1.0
+    gamma=1.0,beta=0.005
 ):
     """
     Implémentation de l'Equation (4) du papier CCVAE adaptée à la régression.
@@ -59,7 +59,7 @@ def loss_regression_paper(
     # Total KL Divergence
     # Le signe est positif ici car on minimise la Loss (donc on minimise la KL)
     # Dans l'ELBO (à maximiser), ce serait un signe moins.
-    kld_loss = kld_not_c + kld_c
+    kld_loss =beta*(kld_not_c + kld_c)
 
     # ----------------------------------------------------------
     # 3. log q(y|z_c) : Régression Latente
@@ -68,7 +68,7 @@ def loss_regression_paper(
     # log q(y|z) ~ -||y - y_pred||^2
     # gamma correspond au alpha du papier.
     reg_loss = F.mse_loss(y_pred, y_true, reduction='sum')
-
+    # reg_loss = F.smooth_l1_loss(y_pred, y_true, reduction='sum')
     # ----------------------------------------------------------
     # TOTAL LOSS (à minimiser)
     # ----------------------------------------------------------

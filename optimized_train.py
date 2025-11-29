@@ -18,15 +18,16 @@ from loss import loss_regression_paper
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Hyperparamètres
-BATCH_SIZE = 64        # 64 est bien pour des images 64x64
+BATCH_SIZE = 32       # 64 est bien pour des images 64x64
 LR = 1e-4
-EPOCHS = 50            # Ça converge assez vite
+EPOCHS = 200            # Ça converge assez vite
 LABELED_RATIO = 0.8    # On a beaucoup de labels (tout UTKFace), autant en profiter !
 
 # Dimensions
 Z_C_DIM = 16           # Age embedding
 Z_NOT_C_DIM = 64       # Identité (besoin de place pour les détails du visage)
-GAMMA = 50.0           # Poids de la régression (MSE)
+GAMMA = 100           # Poids de la régression (MSE)
+BETA=0.001
 
 # ------------------------------------------------------------
 # 2. UTILS
@@ -43,20 +44,18 @@ def split_supervised(dataset, labeled_ratio):
 # 3. TRAINING LOOP
 # ------------------------------------------------------------
 def train():
-    os.makedirs("results_age", exist_ok=True)
+    os.makedirs("results_age_128_128", exist_ok=True)
 
     transform = transforms.Compose([
-        transforms.Resize((64, 64)),
+        transforms.Resize((128, 128)),
         transforms.ToTensor(),
     ])
 
     print("Chargement du dataset UTKFace...")
     # Assure-toi que le chemin est bon !
-    dataset = UTKFaceDataset(root_dir="./data/UTKFace", transform=transform)
+    dataset = UTKFaceDataset(root_dir="./UTKFace", transform=transform)
     
     # Split Labeled / Unlabeled
-    # Note : Dans UTKFace, tout est labeled, mais le CCVAE peut ignorer les labels du set "unlabeled"
-    # pour apprendre le style de manière non supervisée.
     labeled_set, unlabeled_set = split_supervised(dataset, LABELED_RATIO)
     print(f"--> Données : {len(labeled_set)} Labeled | {len(unlabeled_set)} Unlabeled")
 
@@ -74,6 +73,9 @@ def train():
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
     print(f"Démarrage Entraînement AGE sur {DEVICE}...")
 
     for epoch in range(EPOCHS):
@@ -87,7 +89,7 @@ def train():
         
         labeled_iter = iter(labeled_loader)
 
-        # On boucle sur le dataset Unlabeled (souvent utilisé comme base de taille)
+        # On boucle sur le dataset Unlabeled
         for x_unlabeled, _ in unlabeled_loader:
             x_unlabeled = x_unlabeled.to(DEVICE)
 
@@ -104,16 +106,14 @@ def train():
             optimizer.zero_grad()
 
             # --- Forward ---
-            # Le modèle retourne : recon, mu, logvar, y_pred, prior_mu, prior_logvar
             recon, mu, logvar, y_pred, p_mu, p_logvar = model(x_labeled, y_labeled)
 
             # --- Loss ---
-            # On utilise la loss spécifique régression
             loss, stats = loss_regression_paper(
                 recon, x_labeled, mu, logvar, 
                 y_pred, y_labeled, 
                 p_mu, p_logvar, 
-                gamma=GAMMA
+                gamma=GAMMA,beta=BETA
             )
 
             # --- Backward ---
@@ -122,7 +122,7 @@ def train():
 
             # --- Stats ---
             total_loss += loss.item()
-            total_reg_loss += stats['reg'] # MSE pure
+            total_reg_loss += stats['reg'] 
             
             # Calcul MAE (Mean Absolute Error) en années (x100 car normalisé)
             with torch.no_grad():
@@ -140,43 +140,47 @@ def train():
         avg_mae = total_mae / total_batches
         
         print(f"Epoch {epoch+1}/{EPOCHS} | {duration:.0f}s | Loss: {avg_loss:.1f} | MAE Global: {avg_mae:.2f} ans")
+        scheduler.step(avg_mae)
 
-        # --- VISUALISATION (Aging Progression) ---
-        # Toutes les 5 époques, on génère une bande de vieillissement
+        # --- VISUALISATION (Reconstruction + Aging) ---
         if (epoch + 1) % 5 == 0 or (epoch == 0):
             model.eval()
-            print("    [Génération Aging Strip...]")
+            print("    [Génération Visualisations...]")
+            
             with torch.no_grad():
-                # On prend un visage du set de test (unlabeled)
-                test_img = x_unlabeled[0:1] # (1, 3, 64, 64)
+                # --- A. RECONSTRUCTION ---
+                test_batch = x_unlabeled[:8]
+                recon_batch, _, _, _, _, _ = model(test_batch)
+                recon_comparison = torch.cat([test_batch, recon_batch])
+                save_image(recon_comparison.cpu(), f"results_age_128_128/recon_epoch_{epoch+1}.png", nrow=8)
+
+                # --- B. AGING STRIP ---
+                target_img = x_unlabeled[0:1] 
+                _, mu_enc, _, _, _, _ = model(target_img)
+                z_not_c = mu_enc[:, Z_C_DIM:]
                 
-                # 1. On extrait son style (Identité)
-                # forward sans y retourne (recon, mu, logvar, y_pred, None, None)
-                _, mu_enc, _, _, _, _ = model(test_img)
-                z_not_c = mu_enc[:, Z_C_DIM:] # On garde la partie style
-                
-                # 2. On génère des âges cibles : 10 ans, 20 ans ... 90 ans
-                # 0.1, 0.2 ... 0.9
-                target_ages = torch.linspace(0.1, 0.9, 9).unsqueeze(1).to(DEVICE)
-                
-                # 3. On calcule les z_c pour ces âges via le Prior Network
-                h_prior = model.prior_net(target_ages)
+                # Ages cibles
+                ages_steps = torch.linspace(0.1, 0.9, 9).unsqueeze(1).to(DEVICE)
+                h_prior = model.prior_net(ages_steps)
                 z_c_targets = model.prior_mu(h_prior)
                 
-                # 4. On combine : Style Fixe + Ages Variables
-                # On répète le style 9 fois
+                # Combine
                 z_not_c_repeated = z_not_c.repeat(9, 1)
                 z_combined = torch.cat([z_c_targets, z_not_c_repeated], dim=1)
                 
-                # 5. Décodage
-                dec_in = model.decoder_input(z_combined).view(-1, 256, 4, 4) # Attention aux channels (match model.py)
+                # --- CORRECTION ICI : view(-1, 64, 4, 4) ---
+                # Cela correspond à 1024 neurones / (4*4) = 64 canaux
+                # dec_in = model.decoder_input(z_combined).view(-1, 64, 4, 4) 
+                dec_in = model.decoder_input(z_combined).view(-1, 512, 4, 4) 
+                
                 generated_faces = model.decoder_conv(dec_in)
                 
-                # Sauvegarde : Original à gauche, Vieillissement à droite
-                comparison = torch.cat([test_img, generated_faces])
-                save_image(comparison.cpu(), f"results_age/aging_epoch_{epoch+1}.png", nrow=10)
+                aging_strip = torch.cat([target_img, generated_faces])
+                save_image(aging_strip.cpu(), f"results_age_128_128/aging_epoch_{epoch+1}.png", nrow=10)
             
-            torch.save(model.state_dict(), "ccvae_regression_utk.pth")
+            # Sauvegarde du modèle
+            torch.save(model.state_dict(), "ccvae_regression_utk_128.pth")
+            print("    [Images et Modèle sauvegardés]")
 
 if __name__ == "__main__":
     train()
