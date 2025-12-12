@@ -1,5 +1,9 @@
 # Python
 __pycache__/
+classification_mono/__pycache__/
+classification_mono/losses/__pycache__/
+classification_multi/__pycache__/
+regression/__pycache__/
 *.pyc
 
 # Environments
