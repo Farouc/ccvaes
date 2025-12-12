@@ -8,10 +8,6 @@ ccvae_env/
 # Data
 data/
 
-# Model weights
-*.pth
-model_weights/
-
 # Results / artifacts
 results*/
 training_logs.txt
