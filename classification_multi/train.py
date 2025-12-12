@@ -1,14 +1,15 @@
+import os
+import time
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 from torchvision.utils import save_image
-import os
 
-# Tes imports locaux (Mise à jour du nom du Dataset)
+# Local imports
 from model import CCVAE
-from dataset import CartoonMultiLabelDataset 
+from dataset import CartoonMultiLabelDataset
 from loss import ccvae_loss_supervised_paper, ccvae_loss_unsupervised_paper
 
 # ------------------------------------------------------------
@@ -16,187 +17,212 @@ from loss import ccvae_loss_supervised_paper, ccvae_loss_unsupervised_paper
 # ------------------------------------------------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Attributs cibles
-ATTRIBUTES = ["hair_color", "face_color"] 
+# Target attributes for multi-label learning
+ATTRIBUTES = ["hair_color", "face_color"]
 
-# Hyperparamètres d'entraînement
-BATCH_SIZE = 32
+# Training hyperparameters
+BATCH_SIZE = 128
 LR = 1e-4
-EPOCHS = 70
-LABELED_RATIO = 0.5 
-K_SAMPLES = 10 
+EPOCHS = 110
+LABELED_RATIO = 0.5
+K_SAMPLES = 10
 
-# Dimensions Latentes
-# On donne 16 dimensions pour encoder les cheveux, 16 pour le visage
-Z_C_DIMS = [16, 16] 
-Z_NOT_C_DIM = 32 # On réduit un peu z_not_c pour forcer l'info dans z_c
-
-# Hyperparamètres de Loss
-ALPHA = 1.0  
-GAMMA = 20.0 # Boost classification
+# Latent dimensions and loss weights
+Z_C_DIMS = [16, 16]      # One z_c block per attribute
+Z_NOT_C_DIM = 32        # Shared nuisance / style latent
+GAMMA = 30.0            # Auxiliary classification weight
+ALPHA = 1.0             # Unsupervised loss weight
 
 # ------------------------------------------------------------
 # 2. UTILS
 # ------------------------------------------------------------
 def split_supervised(dataset, labeled_ratio):
+    """
+    Split the dataset into labeled and unlabeled subsets.
+    The split is deterministic for reproducibility.
+    """
     n_total = len(dataset)
     n_labeled = int(n_total * labeled_ratio)
     n_unlabeled = n_total - n_labeled
-    return random_split(dataset, [n_labeled, n_unlabeled], 
-                        generator=torch.Generator().manual_seed(42))
+
+    return random_split(
+        dataset,
+        [n_labeled, n_unlabeled],
+        generator=torch.Generator().manual_seed(42),
+    )
 
 # ------------------------------------------------------------
 # 3. TRAINING LOOP
 # ------------------------------------------------------------
 def train():
-    os.makedirs("results_multi", exist_ok=True)
+    os.makedirs("results", exist_ok=True)
 
     transform = transforms.Compose([
         transforms.Resize((64, 64)),
         transforms.ToTensor(),
     ])
 
-    print(f"Chargement du dataset pour attributs : {ATTRIBUTES}...")
-    
-    # --- Changement ici : CartoonMultiLabelDataset ---
+    print("Loading Cartoon multi-label dataset...")
     dataset = CartoonMultiLabelDataset(
-        root_dir="./cartoonset10k/cartoonset10k", 
+        root_dir="../data/cartoonset10k/cartoonset10k",
         target_attributes=ATTRIBUTES,
-        transform=transform
+        transform=transform,
     )
-    
-    # On récupère la liste des classes (ex: [10, 11])
+
     num_classes_list = dataset.num_classes_list
-    print(f"Classes par attribut : {num_classes_list}")
 
     labeled_set, unlabeled_set = split_supervised(dataset, LABELED_RATIO)
-    print(f"--> Données : {len(labeled_set)} Labeled | {len(unlabeled_set)} Unlabeled")
+    print(f"Dataset split: {len(labeled_set)} labeled | {len(unlabeled_set)} unlabeled")
 
-    labeled_loader = DataLoader(labeled_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-    unlabeled_loader = DataLoader(unlabeled_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    # DataLoader performance options
+    loader_kwargs = (
+        dict(num_workers=4, pin_memory=True, persistent_workers=True)
+        if DEVICE.type == "cuda"
+        else {}
+    )
 
-    # --- B. Model Setup (Multi-Label) ---
+    labeled_loader = DataLoader(
+        labeled_set,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        drop_last=True,
+        **loader_kwargs,
+    )
+
+    unlabeled_loader = DataLoader(
+        unlabeled_set,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        drop_last=True,
+        **loader_kwargs,
+    )
+
+    # Model
     model = CCVAE(
         img_channels=3,
-        z_c_dims=Z_C_DIMS,       # Liste [16, 16]
-        z_not_c_dim=Z_NOT_C_DIM, 
-        num_classes_list=num_classes_list # Liste [10, 11]
+        z_c_dims=Z_C_DIMS,
+        z_not_c_dim=Z_NOT_C_DIM,
+        num_classes_list=num_classes_list,
     ).to(DEVICE)
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
 
-    print(f"Démarrage de l'entraînement sur {DEVICE}...")
+    print(f"Starting training on {DEVICE} (checkpoint every 5 epochs)")
 
-    # --- C. Epoch Loop ---
     for epoch in range(EPOCHS):
+        start_time = time.time()
         model.train()
-        
-        # Stats cumulées
-        total_loss = 0
-        total_sup = 0
-        total_unsup = 0
-        total_aux = 0
-        
-        # Pour stocker l'accuracy par attribut (dictionnaire)
-        total_acc_per_attr = {i: 0.0 for i in range(len(ATTRIBUTES))}
-        
+
+        total_loss = 0.0
+        total_aux_loss = 0.0
         total_batches = 0
+
+        # Accuracy accumulators per attribute
+        total_acc_per_attr = {i: 0.0 for i in range(len(ATTRIBUTES))}
 
         labeled_iter = iter(labeled_loader)
 
         for x_unlabeled, _ in unlabeled_loader:
             x_unlabeled = x_unlabeled.to(DEVICE)
 
-            # 1. Batch Labeled
+            # Infinite cycling over labeled data
             try:
                 x_labeled, y_labeled = next(labeled_iter)
             except StopIteration:
                 labeled_iter = iter(labeled_loader)
                 x_labeled, y_labeled = next(labeled_iter)
-            
+
             x_labeled = x_labeled.to(DEVICE)
-            y_labeled = y_labeled.to(DEVICE) # Shape (B, 2)
+            y_labeled = y_labeled.to(DEVICE)
 
             optimizer.zero_grad()
 
-            # ---------------------------------------------------------
-            # 2. Calcul des Loss
-            # ---------------------------------------------------------
-
-            # A. Loss Supervisée (Loss Paper Multi-Label)
+            # --------------------------------------------------
+            # A. CCVAE losses (supervised + unsupervised)
+            # --------------------------------------------------
             loss_sup, _ = ccvae_loss_supervised_paper(
-                model, x_labeled, y_labeled, K=K_SAMPLES, recon_type="bce"
+                model,
+                x_labeled,
+                y_labeled,
+                K=K_SAMPLES,
+                recon_type="bce",
             )
 
-            # B. Loss Non-Supervisée
             loss_unsup, _ = ccvae_loss_unsupervised_paper(
-                model, x_unlabeled, K=K_SAMPLES, recon_type="bce"
+                model,
+                x_unlabeled,
+                K=K_SAMPLES,
+                recon_type="bce",
             )
 
-            # C. Auxiliary Classification Loss (Le Boost)
-            # On doit faire un forward manuel pour récupérer les logits
-            # model retourne : recon, mu, logvar, logits_list, prior_mu_list, prior_logvar_list
+            # --------------------------------------------------
+            # B. Auxiliary classification loss + accuracy
+            # --------------------------------------------------
             _, _, _, logits_list, _, _ = model(x_labeled)
-            
-            aux_class_loss = 0
-            
-            # On somme la CrossEntropy pour chaque attribut
-            # y_labeled[:, i] contient les labels pour l'attribut i
-            for i in range(len(ATTRIBUTES)):
-                aux_class_loss += F.cross_entropy(logits_list[i], y_labeled[:, i])
 
-            # ---------------------------------------------------------
-            # 3. Optimisation
-            # ---------------------------------------------------------
+            aux_class_loss = 0.0
+
+            for i in range(len(ATTRIBUTES)):
+                aux_class_loss += F.cross_entropy(
+                    logits_list[i],
+                    y_labeled[:, i],
+                )
+
+                with torch.no_grad():
+                    preds = torch.argmax(logits_list[i], dim=1)
+                    acc = (preds == y_labeled[:, i]).float().mean()
+                    total_acc_per_attr[i] += acc.item()
+
+            # --------------------------------------------------
+            # C. Total loss
+            # --------------------------------------------------
             loss = loss_sup + (ALPHA * loss_unsup) + (GAMMA * aux_class_loss)
 
             loss.backward()
             optimizer.step()
 
-            # ---------------------------------------------------------
-            # 4. Monitoring
-            # ---------------------------------------------------------
             total_loss += loss.item()
-            total_sup += loss_sup.item()
-            total_unsup += loss_unsup.item()
-            total_aux += aux_class_loss.item()
+            total_aux_loss += aux_class_loss.item()
             total_batches += 1
 
-            # Calcul Accuracy par attribut
-            with torch.no_grad():
-                for i in range(len(ATTRIBUTES)):
-                    preds = torch.argmax(logits_list[i], dim=1)
-                    acc = (preds == y_labeled[:, i]).float().mean()
-                    total_acc_per_attr[i] += acc.item()
-
             if total_batches % 50 == 0:
-                # On formate l'affichage des acc
-                acc_str = " | ".join([f"{ATTRIBUTES[i]}: {(total_acc_per_attr[i]/total_batches):.1%}" 
-                                      for i in range(len(ATTRIBUTES))])
-                
-                print(f"   Batch {total_batches} | Loss: {loss.item():.1f} | Aux: {aux_class_loss.item():.2f} | {acc_str}")
+                acc_str = " | ".join(
+                    f"{ATTRIBUTES[i]}: {(total_acc_per_attr[i] / total_batches):.1%}"
+                    for i in range(len(ATTRIBUTES))
+                )
+                print(
+                    f"  Batch {total_batches} | "
+                    f"Loss: {loss.item():.1f} | {acc_str}"
+                )
 
-        # --- Fin de l'époque ---
+        # --------------------------------------------------
+        # End of epoch
+        # --------------------------------------------------
+        duration = time.time() - start_time
         avg_loss = total_loss / total_batches
-        avg_aux = total_aux / total_batches
-        
-        print(f"===> Epoch {epoch+1}/{EPOCHS} terminée.")
-        print(f"     Avg Loss: {avg_loss:.2f} | Avg Aux Class Loss: {avg_aux:.4f}")
-        
+
+        print(f"Epoch {epoch+1}/{EPOCHS} | {duration:.0f}s | Avg Loss: {avg_loss:.1f}")
         for i in range(len(ATTRIBUTES)):
             avg_acc = total_acc_per_attr[i] / total_batches
-            print(f"     Accuracy {ATTRIBUTES[i]}: {avg_acc:.2%}")
+            print(f"  -> {ATTRIBUTES[i]} accuracy: {avg_acc:.2%}")
 
-        # Sauvegarde images test
-        with torch.no_grad():
-            test_x = x_unlabeled[:8]
-            # model(x) retourne un tuple, le premier élément est recon_x
-            recon_x = model(test_x)[0] 
-            comparison = torch.cat([test_x, recon_x])
-            save_image(comparison.cpu(), f"results_multi/recon_epoch_{epoch+1}.png", nrow=8)
+        # --------------------------------------------------
+        # Checkpoint & visualization (every 5 epochs)
+        # --------------------------------------------------
+        if (epoch + 1) % 5 == 0:
+            print("  Saving checkpoint and reconstructions...")
+            with torch.no_grad():
+                test_x = x_unlabeled[:8]
+                recon_x = model(test_x)[0]
+                comparison = torch.cat([test_x, recon_x])
+                save_image(
+                    comparison.cpu(),
+                    f"results/recon_epoch_{epoch+1}.png",
+                    nrow=8,
+                )
 
-        torch.save(model.state_dict(), "ccvae_multilabel.pth")
-        print("     Modèle sauvegardé.\n")
+            torch.save(model.state_dict(), "ccvae_multilabel_r.pth")
+
 
 if __name__ == "__main__":
     train()
