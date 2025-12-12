@@ -97,7 +97,8 @@ def ccvae_loss_supervised_paper(
         # 3. log p(x|z)
         # -----------------------------
         dec_in = model.decoder_input(z)          # (B, 64*4*4)
-        dec_in = dec_in.view(-1, 64, 4, 4)
+        # dec_in = dec_in.view(-1, 64, 4, 4)
+        dec_in = dec_in.view(-1, 64, 8, 8)
         recon_x = model.decoder_conv(dec_in)     # (B, 3, 64, 64)
 
         log_p_xz = log_px_given_z(x, recon_x, recon_type)  # (B,)
@@ -248,7 +249,7 @@ def ccvae_loss_unsupervised_paper(
         # 4. log p(x|z)
         # -----------------------------
         dec_in = model.decoder_input(z)
-        dec_in = dec_in.view(-1, 64, 4, 4)
+        dec_in = dec_in.view(-1, 64, 8, 8)
         recon_x = model.decoder_conv(dec_in)
 
         log_p_xz = log_px_given_z(x, recon_x, recon_type=recon_type)  # (B,)

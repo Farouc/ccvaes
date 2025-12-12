@@ -49,13 +49,14 @@ def train():
     # --- A. Data Loading ---
     # Note: Pas de normalisation moyenne/std car BCE attend des inputs [0, 1]
     transform = transforms.Compose([
-        transforms.Resize((64, 64)),
+        # transforms.Resize((64, 64)),
+        transforms.Resize((128, 128)),
         transforms.ToTensor(),
     ])
 
     print("Chargement du dataset CartoonSet10k...")
     # Vérifie bien que le chemin pointe vers le dossier contenant les images
-    dataset = CartoonHairColorDataset(root_dir="./cartoonset10k/cartoonset10k", transform=transform)
+    dataset = CartoonHairColorDataset(root_dir="./cartoonset10k/cartoonset10k/cartoonset10k", transform=transform)
     num_classes = dataset.num_classes
 
     # Split

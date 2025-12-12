@@ -26,18 +26,33 @@ class CCVAE(nn.Module):
             nn.Flatten()
         )
 
-        self.fc_mu = nn.Linear(64 * 4 * 4, self.total_z_dim)
-        self.fc_logvar = nn.Linear(64 * 4 * 4, self.total_z_dim)
+        # self.fc_mu = nn.Linear(64 * 4 * 4, self.total_z_dim)
+        # self.fc_logvar = nn.Linear(64 * 4 * 4, self.total_z_dim)
+
+        self.fc_mu = nn.Linear(64 * 8 * 8, self.total_z_dim)
+        self.fc_logvar = nn.Linear(64 * 8 * 8, self.total_z_dim)
+
 
         # --------------------------
         # 2. DECODER p(x|z)
         # --------------------------
-        self.decoder_input = nn.Linear(self.total_z_dim, 64 * 4 * 4)
+        # self.decoder_input = nn.Linear(self.total_z_dim, 64 * 4 * 4)
+        self.decoder_input = nn.Linear(self.total_z_dim, 64 * 8 * 8)
+
+        # self.decoder_conv = nn.Sequential(
+        #     nn.ConvTranspose2d(64, 64, 4, 2, 1), nn.ReLU(),
+        #     nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),
+        #     nn.ConvTranspose2d(32, 32, 4, 2, 1), nn.ReLU(),
+        #     nn.ConvTranspose2d(32, img_channels, 4, 2, 1),
+        #     nn.Sigmoid()
+        # )
+
         self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, 4, 2, 1), nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),
-            nn.ConvTranspose2d(32, 32, 4, 2, 1), nn.ReLU(),
-            nn.ConvTranspose2d(32, img_channels, 4, 2, 1),
+            nn.ConvTranspose2d(64, 64, 4, 2, 1), nn.ReLU(),   # 8 → 16
+            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),   # 16 → 32
+            nn.ConvTranspose2d(32, 32, 4, 2, 1), nn.ReLU(),   # 32 → 64
+            nn.ConvTranspose2d(32, 16, 4, 2, 1), nn.ReLU(),   # 64 → 128
+            nn.ConvTranspose2d(16, img_channels, 3, 1, 1),
             nn.Sigmoid()
         )
 
@@ -80,7 +95,9 @@ class CCVAE(nn.Module):
 
         # D. Reconstruction
         dec_in = self.decoder_input(z)
-        dec_in = dec_in.view(-1, 64, 4, 4)
+        # dec_in = dec_in.view(-1, 64, 4, 4)
+        dec_in = dec_in.view(-1, 64, 8, 8)
+
         recon_x = self.decoder_conv(dec_in)
 
         # E. Classifieur q(y|z_c)
