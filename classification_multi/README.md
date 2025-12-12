@@ -3,27 +3,8 @@
 Ce projet est une implémentation **PyTorch** du modèle **CCVAE**, basée sur le papier de recherche *"Capturing Label Characteristics in VAEs"* (Joy et al., ICLR 2021)[cite: 1, 11].
 
 L'objectif est de structurer l'espace latent d'un VAE pour séparer le **style** (fond, forme globale) des **caractéristiques spécifiques** (attributs étiquetés comme la couleur de cheveux, les lunettes, etc.), permettant ainsi des manipulations précises de l'image.
-## 🌿 Organisation du Projet (Branches)
 
-Le projet est divisé en trois branches indépendantes selon la tâche effectuée :
-
-### 1. Branche `main`
-* **Tâche :** Classification Mono-label (Discret).
-* **Objectif :** Prédire et manipuler un seul attribut (ex: `hair_color`).
-* **Dataset :** CartoonSet10k.
-
-### 2. Branche `multi_label`
-* **Tâche :** Classification Multi-label (Discret).
-* **Objectif :** Prédire et manipuler plusieurs attributs simultanément (ex: `hair_color` et `face_color`) en désintriquant le style.
-* **Dataset :** CartoonSet10k.
-
-### 3. Branche `regression`
-* **Tâche :** Régression (Continu).
-* **Objectif :** Prédire une valeur continue (l'âge) et générer le vieillissement artificiel (*Aging*).
-* **Dataset :** UTKFace.
-    * ℹ️ *Le lien pour télécharger le dataset UTKFace (Aligned & Cropped) est disponible dans le notebook `demo_regression.ipynb` situé sur cette branche.*
-
-## 📂 Structure du Projet (à modifier)
+## 📂 Structure du Projet
 
   * `model.py` : Architecture du CCVAE (Encodeur, Décodeur, Classifieur Latent)[cite: 11, 14].
   * `loss.py` : Fonction de coût spécifique (Reconstruction + KL Divergence + Perte de supervision)[cite: 153, 154].
