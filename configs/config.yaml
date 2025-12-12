@@ -1,0 +1,55 @@
+# configs/config.yaml
+
+# --- 1. EXPERIMENT SETUP ---
+experiment_name: "face_experiment_v1"
+output_dir: "./results"
+
+# --- 2. DATASET CONFIG ---
+# Path to the folder containing your images (e.g., UTKFace)
+# Windows example: "C:/Users/Z/Desktop/datasets/UTKFace"
+# Linux/Mac example: "/home/user/datasets/UTKFace"
+dataset_path: "./data/UTKFace" 
+
+image_size: 64
+num_workers: 2      # Set to 0 if you are debugging or on Windows with issues
+
+# --- 3. MODEL CONFIGURATION ---
+# Choose default size: "small", "medium", "large"
+model_size: "medium" 
+
+# Architecture definitions
+model_configs:
+  small:
+    d_model: 128
+  medium:
+    d_model: 256
+  large:
+    d_model: 512
+
+# --- 4. TASK SELECTION (Uncomment the one you want) ---
+
+# [OPTION A] Regression (e.g., Predicting Age)
+# Uses MSELoss. Output dim is 1 (Age value).
+# task_type: "regression"
+# output_dim: 1
+
+# [OPTION B] Classification Mono (e.g., Predicting Gender)
+# Uses CrossEntropyLoss. Output dim is 2 (Male/Female).
+task_type: "classification_mono"
+output_dim: 2
+
+# [OPTION C] Classification Multi (e.g., Race or Attributes)
+# Uses BCEWithLogitsLoss. Output dim depends on your classes (e.g., 5 races).
+# task_type: "classification_multi"
+# output_dim: 5
+
+# --- 5. LOSS CONFIGURATION ---
+# Options: "paper", "ours", "contrastive"
+loss_type: "paper"
+
+# --- 6. TRAINING HYPERPARAMETERS ---
+training:
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  save_interval: 5   # Save weights and figures every 5 epochs

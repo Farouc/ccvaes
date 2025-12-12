@@ -1,373 +1,191 @@
-# train.py
+import os
+import sys
+import argparse
+import yaml
 import torch
 import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.utils import save_image
-import os
+import matplotlib.pyplot as plt
+import numpy as np
+from datetime import datetime
 
-# Imports locaux
-from model import CCVAE
-from dataset import CartoonHairColorDataset
-from loss import ccvae_loss_supervised_paper, ccvae_loss_unsupervised_paper
+# --- IMPORTS FROM YOUR PROJECT STRUCTURE ---
+# We add the current directory to sys.path to ensure we can import 'src'
+sys.path.append(os.getcwd())
 
-# ------------------------------------------------------------
-# 1. CONFIGURATION
-# ------------------------------------------------------------
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from src.dataset.utk_faces import UTKFaceDataset
+# from src.dataset.cartoonset import CartoonSetDataset # Uncomment if needed
+from src.models.ccvae import CCVAE
+from src.loss import get_loss_function
 
-# Training Hyperparameters
-BATCH_SIZE = 32
-LR = 1e-4
-EPOCHS = 70
-LABELED_RATIO = 0.5   
-K_SAMPLES = 10        
+# --- HELPER: SAVE PLOTS ---
+def save_reconstruction_plot(original, reconstructed, epoch, save_dir, n_images=8):
+    """
+    Saves a grid of images: Top row = Original, Bottom row = Reconstruction.
+    """
+    model_output_device = original.device
+    orig = original[:n_images].detach().cpu()
+    recon = reconstructed[:n_images].detach().cpu()
+    
+    # Create a figure
+    fig, axes = plt.subplots(2, n_images, figsize=(n_images * 2, 4))
+    
+    for i in range(min(n_images, len(orig))):
+        # Original Image: (C, H, W) -> (H, W, C)
+        img_orig = orig[i].permute(1, 2, 0).numpy()
+        img_orig = np.clip(img_orig, 0, 1) # Ensure valid range
+        
+        axes[0, i].imshow(img_orig)
+        axes[0, i].axis('off')
+        if i == 0: axes[0, i].set_title("Original")
 
-# Loss Hyperparameters
-ALPHA = 1.0           # Unsupervised Loss Weight
-GAMMA = 20.0          # Auxiliary Classification Weight
-CONTRASTIVE_WEIGHT = 5.0 # <--- NEW: Weight for Supervised Contrastive Loss on z_c
+        # Reconstructed Image
+        img_recon = recon[i].permute(1, 2, 0).numpy()
+        img_recon = np.clip(img_recon, 0, 1)
+        
+        axes[1, i].imshow(img_recon)
+        axes[1, i].axis('off')
+        if i == 0: axes[1, i].set_title("Reconstructed")
 
-# ------------------------------------------------------------
-# 2. UTILS
-# ------------------------------------------------------------
-def split_supervised(dataset, labeled_ratio):
-    """Sépare le dataset en deux parties fixes."""
-    n_total = len(dataset)
-    n_labeled = int(n_total * labeled_ratio)
-    n_unlabeled = n_total - n_labeled
-    return random_split(dataset, [n_labeled, n_unlabeled], 
-                        generator=torch.Generator().manual_seed(42))
+    plt.tight_layout()
+    filename = os.path.join(save_dir, f"recon_epoch_{epoch}.png")
+    plt.savefig(filename)
+    plt.close()
+    print(f"Saved reconstruction figure: {filename}")
 
-# ------------------------------------------------------------
-# 3. TRAINING LOOP
-# ------------------------------------------------------------
+def load_config(config_path):
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+# --- MAIN TRAINING LOOP ---
 def train():
-    os.makedirs("results", exist_ok=True)
+    parser = argparse.ArgumentParser(description="CCVAE Training Script")
+    parser.add_argument('--config', type=str, default='configs/config.yaml', help='Path to config file')
+    
+    # CLI Overrides
+    parser.add_argument('--model_size', type=str, help='Override model size (small, medium, large)')
+    parser.add_argument('--loss', type=str, help='Override loss type (paper, ours, contrastive)')
+    parser.add_argument('--task', type=str, help='Override task type (regression, classification_mono, etc)')
+    
+    args = parser.parse_args()
+    
+    # 1. Load Configuration
+    cfg = load_config(args.config)
+    
+    # 2. Apply Overrides (CLI takes precedence over config.yaml)
+    current_size = args.model_size if args.model_size else cfg['model_size']
+    current_loss = args.loss if args.loss else cfg['loss_type']
+    current_task = args.task if args.task else cfg['task_type']
+    
+    # 3. Resolve Output Dimension based on Task
+    # This fixes the mismatch error you saw earlier
+    if current_task == 'regression':
+        current_output_dim = 1
+    elif current_task == 'classification_mono':
+        current_output_dim = 2
+    else:
+        # For multi-class, trust the config or default to something specific
+        current_output_dim = cfg.get('output_dim', 2)
 
-    # --- A. Data Loading ---
+    # 4. Setup Directories
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{cfg['experiment_name']}_{current_size}_{current_loss}_{current_task}_{timestamp}"
+    save_dir = os.path.join(cfg['output_dir'], run_name)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Save the effective config for reproducibility
+    cfg['actual_run_params'] = {
+        'model_size': current_size,
+        'loss_type': current_loss, 
+        'task_type': current_task,
+        'output_dim': current_output_dim
+    }
+    with open(os.path.join(save_dir, 'config_used.yaml'), 'w') as f:
+        yaml.dump(cfg, f)
+
+    print(f"--- Starting Training ---")
+    print(f"Model Size: {current_size}")
+    print(f"Loss Type : {current_loss}")
+    print(f"Task Type : {current_task} (Output Dim: {current_output_dim})")
+    print(f"Saving to : {save_dir}")
+
+    # 5. Initialize Dataset & Dataloader
+    # Using the class from src/dataset/utk_faces.py
     transform = transforms.Compose([
-        transforms.Resize((64, 64)),
+        transforms.Resize((cfg['image_size'], cfg['image_size'])),
         transforms.ToTensor(),
     ])
+    
+    print(f"Loading dataset from: {cfg['dataset_path']}")
+    dataset = UTKFaceDataset(
+        root_dir=cfg['dataset_path'], 
+        transform=transform, 
+        task_type=current_task
+    )
+    
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=cfg['training']['batch_size'], 
+        shuffle=True, 
+        num_workers=cfg.get('num_workers', 0)
+    )
 
-    print("Chargement du dataset CartoonSet10k...")
-    dataset = CartoonHairColorDataset(root_dir="./cartoonset10k/cartoonset10k", transform=transform)
-    num_classes = dataset.num_classes
-
-    # Split
-    labeled_set, unlabeled_set = split_supervised(dataset, LABELED_RATIO)
-    print(f"--> Données : {len(labeled_set)} Labeled | {len(unlabeled_set)} Unlabeled")
-
-    # Dataloaders
-    labeled_loader = DataLoader(labeled_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-    unlabeled_loader = DataLoader(unlabeled_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-
-    # --- B. Model Setup ---
+    # 6. Initialize Model
+    # Using the class from src/models/ccvae.py
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_params = cfg['model_configs'][current_size]
+    
     model = CCVAE(
-        img_channels=3,
-        z_c_dim=16,
-        z_not_c_dim=64, # Check if your model uses 32 or 64
-        num_classes=num_classes
-    ).to(DEVICE)
+        config=model_params, 
+        output_dim=current_output_dim, 
+        task_type=current_task
+    ).to(device)
+    
+    optimizer = optim.Adam(model.parameters(), lr=cfg['training']['learning_rate'])
+    
+    # 7. Initialize Loss
+    # Using the function from src/models/loss.py
+    loss_fn = get_loss_function(current_loss, current_task)
 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-
-    print(f"Démarrage de l'entraînement sur {DEVICE}...")
-    print(f"Options : Gamma={GAMMA}, Contrastive={CONTRASTIVE_WEIGHT}, Recon=BCE, Alpha={ALPHA}")
-
-    # --- C. Epoch Loop ---
-    for epoch in range(EPOCHS):
+    # 8. Training Loop
+    epochs = cfg['training']['epochs']
+    
+    for epoch in range(1, epochs + 1):
         model.train()
-        total_loss = 0
-        total_sup = 0
-        total_class_loss = 0
-        total_contrastive_loss = 0
-        total_acc = 0
-        total_batches = 0
-
-        labeled_iter = iter(labeled_loader)
-
-        for x_unlabeled, _ in unlabeled_loader:
-            x_unlabeled = x_unlabeled.to(DEVICE)
-
-            # 1. Get Labeled Batch (Infinite Loop)
-            try:
-                x_labeled, y_labeled = next(labeled_iter)
-            except StopIteration:
-                labeled_iter = iter(labeled_loader)
-                x_labeled, y_labeled = next(labeled_iter)
-            
-            x_labeled = x_labeled.to(DEVICE)
-            y_labeled = y_labeled.to(DEVICE)
-
-            optimizer.zero_grad()
-
-            # ---------------------------------------------------------
-            # 2. Calculate Losses
-            # ---------------------------------------------------------
-
-            # A. Supervised Loss (CCVAE Eq 4 + Contrastive)
-            # We pass the new contrastive_weight parameter here
-            loss_sup, stats_sup = ccvae_loss_supervised_paper(
-                model, x_labeled, y_labeled, K=K_SAMPLES, recon_type="bce",
-                contrastive_weight=CONTRASTIVE_WEIGHT
-            )
-
-            # B. Unsupervised Loss (CCVAE Eq 5)
-            loss_unsup, _ = ccvae_loss_unsupervised_paper(
-                model, x_unlabeled, K=K_SAMPLES, recon_type="bce"
-            )
-
-            # C. Auxiliary Classification Loss (Gamma Boost)
-            h = model.encoder_conv(x_labeled)
-            mu = model.fc_mu(h)
-            z_c = mu[:, :model.z_c_dim]
-            logits = model.classifier(z_c)
-            
-            aux_class_loss = F.cross_entropy(logits, y_labeled)
-
-            # ---------------------------------------------------------
-            # 3. Optimization
-            # ---------------------------------------------------------
-            
-            # Note: loss_sup already includes the weighted contrastive term
-            loss = loss_sup + (ALPHA * loss_unsup) + (GAMMA * aux_class_loss)
-
-            loss.backward()
-            optimizer.step()
-
-            # ---------------------------------------------------------
-            # 4. Monitoring
-            # ---------------------------------------------------------
-            total_loss += loss.item()
-            total_sup += loss_sup.item()
-            total_class_loss += aux_class_loss.item()
-            # Retrieve contrastive loss from stats dict
-            total_contrastive_loss += stats_sup.get('loss_contrastive', 0.0)
-            total_batches += 1
-
-            # Calculate Accuracy
-            with torch.no_grad():
-                preds = torch.argmax(logits, dim=1)
-                acc = (preds == y_labeled).float().mean()
-                total_acc += acc.item()
-
-            if total_batches % 50 == 0:
-                print(f"   [Batch {total_batches}] Loss: {loss.item():.1f} | "
-                      f"Sup: {loss_sup.item():.1f} | "
-                      f"Contrast: {stats_sup.get('loss_contrastive', 0.0):.3f} | "
-                      f"Acc: {acc.item():.1%}")
-
-        # --- End of Epoch ---
-        avg_loss = total_loss / total_batches
-        avg_acc = total_acc / total_batches
-        avg_class_loss = total_class_loss / total_batches
-        avg_contrast_loss = total_contrastive_loss / total_batches
+        total_epoch_loss = 0
         
-        print(f"===> Epoch {epoch+1}/{EPOCHS} terminée.")
-        print(f"     Avg Loss: {avg_loss:.2f} | Avg Class Loss: {avg_class_loss:.4f} | Avg Contrast Loss: {avg_contrast_loss:.4f}")
-        print(f"     Global Accuracy: {avg_acc:.2%}")
+        for batch_idx, (images, labels) in enumerate(dataloader):
+            images = images.to(device)
+            labels = labels.to(device)
+            
+            optimizer.zero_grad()
+            
+            # Forward pass
+            # Expecting model to return: reconstruction, prediction, features
+            recon, pred, features = model(images)
+            
+            # Calculate Loss
+            # Loss fn expects: recon, x, pred, target, features
+            total_loss, l_recon, l_task = loss_fn(recon, images, pred, labels, features)
+            
+            total_loss.backward()
+            optimizer.step()
+            
+            total_epoch_loss += total_loss.item()
+            
+            if batch_idx % 10 == 0:
+                print(f"Epoch {epoch} [{batch_idx}/{len(dataloader)}] Loss: {total_loss.item():.4f} (Recon: {l_recon.item():.4f}, Task: {l_task.item():.4f})")
 
-        # Save Test Images
-        with torch.no_grad():
-            test_x = x_unlabeled[:8]
-            recon_x, _, _, _, _, _ = model(test_x)
-            comparison = torch.cat([test_x, recon_x])
-            save_image(comparison.cpu(), f"results/recon_epoch_{epoch+1}.png", nrow=8)
-
-        # Save Model
-        torch.save(model.state_dict(), "ccvae_haircolor.pth")
-        print("     Modèle sauvegardé.\n")
+        # --- SAVING & VISUALIZATION ---
+        if epoch % cfg['training']['save_interval'] == 0 or epoch == epochs:
+            # Save Weights
+            weight_name = f"model_ep{epoch}.pt"
+            torch.save(model.state_dict(), os.path.join(save_dir, weight_name))
+            print(f"Saved weights: {weight_name}")
+            
+            # Save Reconstruction Figure
+            save_reconstruction_plot(images, recon, epoch, save_dir)
 
 if __name__ == "__main__":
     train()
-
-# import torch
-# import torch.optim as optim
-# import torch.nn.functional as F
-# from torch.utils.data import DataLoader, random_split
-# from torchvision import transforms
-# from torchvision.utils import save_image
-# import os
-
-# # Tes imports locaux
-# from model import CCVAE
-# from dataset import CartoonHairColorDataset
-# from loss import ccvae_loss_supervised_paper, ccvae_loss_unsupervised_paper
-
-# # ------------------------------------------------------------
-# # 1. CONFIGURATION
-# # ------------------------------------------------------------
-# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# # Hyperparamètres d'entraînement
-# BATCH_SIZE = 32        # 32 est plus stable pour la convergence que 64 au début
-# LR = 1e-4              # Learning rate standard pour VAE
-# EPOCHS = 70
-# LABELED_RATIO = 0.5   # 20% de données étiquetées
-# K_SAMPLES = 10         # Nombre d'échantillons MC (Importance Sampling)
-
-# # Hyperparamètres de Loss
-# ALPHA = 1.0            # Poids de la loss non-supervisée
-# GAMMA = 20.0           # <--- LE BOOST : Force le modèle à classifier correctement tout de suite
-
-# # ------------------------------------------------------------
-# # 2. UTILS
-# # ------------------------------------------------------------
-# def split_supervised(dataset, labeled_ratio):
-#     """Sépare le dataset en deux parties fixes."""
-#     n_total = len(dataset)
-#     n_labeled = int(n_total * labeled_ratio)
-#     n_unlabeled = n_total - n_labeled
-#     # Le seed 42 assure que ce sont toujours les mêmes images qui sont labeled
-#     return random_split(dataset, [n_labeled, n_unlabeled], 
-#                         generator=torch.Generator().manual_seed(42))
-
-# # ------------------------------------------------------------
-# # 3. TRAINING LOOP
-# # ------------------------------------------------------------
-# def train():
-#     # Création du dossier de sauvegarde
-#     os.makedirs("results", exist_ok=True)
-
-#     # --- A. Data Loading ---
-#     # Note: Pas de normalisation moyenne/std car BCE attend des inputs [0, 1]
-#     transform = transforms.Compose([
-#         transforms.Resize((64, 64)),
-#         transforms.ToTensor(),
-#     ])
-
-#     print("Chargement du dataset CartoonSet10k...")
-#     # Vérifie bien que le chemin pointe vers le dossier contenant les images
-#     dataset = CartoonHairColorDataset(root_dir="./cartoonset10k/cartoonset10k", transform=transform)
-#     num_classes = dataset.num_classes
-
-#     # Split
-#     labeled_set, unlabeled_set = split_supervised(dataset, LABELED_RATIO)
-#     print(f"--> Données : {len(labeled_set)} Labeled | {len(unlabeled_set)} Unlabeled")
-
-#     # Dataloaders (drop_last=True évite les crashs sur le dernier batch incomplet)
-#     labeled_loader = DataLoader(labeled_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-#     unlabeled_loader = DataLoader(unlabeled_set, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-
-#     # --- B. Model Setup ---
-#     model = CCVAE(
-#         img_channels=3,
-#         z_c_dim=16,
-#         z_not_c_dim=64, # Doit matcher ton model.py (32 ou 64, vérifie ton fichier)
-#         num_classes=num_classes
-#     ).to(DEVICE)
-
-#     optimizer = optim.Adam(model.parameters(), lr=LR)
-
-#     print(f"Démarrage de l'entraînement sur {DEVICE}...")
-#     print(f"Options : Gamma={GAMMA}, Recon=BCE, Alpha={ALPHA}")
-
-#     # --- C. Epoch Loop ---
-#     for epoch in range(EPOCHS):
-#         model.train()
-#         total_loss = 0
-#         total_sup = 0
-#         total_class_loss = 0
-#         total_acc = 0
-#         total_batches = 0
-
-#         # Itérateur pour la boucle infinie sur les données labeled
-#         labeled_iter = iter(labeled_loader)
-
-#         # On boucle sur le GRAND dataset (Unlabeled) pour voir toutes les données
-#         for x_unlabeled, _ in unlabeled_loader:
-#             x_unlabeled = x_unlabeled.to(DEVICE)
-
-#             # 1. Récupération du batch labeled (Cycle infini)
-#             try:
-#                 x_labeled, y_labeled = next(labeled_iter)
-#             except StopIteration:
-#                 labeled_iter = iter(labeled_loader)
-#                 x_labeled, y_labeled = next(labeled_iter)
-            
-#             x_labeled = x_labeled.to(DEVICE)
-#             y_labeled = y_labeled.to(DEVICE)
-
-#             optimizer.zero_grad()
-
-#             # ---------------------------------------------------------
-#             # 2. Calcul des Loss
-#             # ---------------------------------------------------------
-
-#             # A. Loss Supervisée (Maths du papier Eq 4)
-#             # recon_type="bce" est crucial pour la netteté des images
-#             loss_sup, _ = ccvae_loss_supervised_paper(
-#                 model, x_labeled, y_labeled, K=K_SAMPLES, recon_type="bce"
-#             )
-
-#             # B. Loss Non-Supervisée (Maths du papier Eq 5)
-#             loss_unsup, _ = ccvae_loss_unsupervised_paper(
-#                 model, x_unlabeled, K=K_SAMPLES, recon_type="bce"
-#             )
-
-#             # C. Auxiliary Classification Loss (Le Boost Pratique)
-#             # On force explicitement z_c à prédire la classe
-#             h = model.encoder_conv(x_labeled)
-#             mu = model.fc_mu(h)
-#             z_c = mu[:, :model.z_c_dim]
-#             logits = model.classifier(z_c)
-            
-#             aux_class_loss = F.cross_entropy(logits, y_labeled)
-
-#             # ---------------------------------------------------------
-#             # 3. Optimisation
-#             # ---------------------------------------------------------
-            
-#             # Loss Totale = Maths VAE + (Gamma * Classification Explicite)
-#             loss = loss_sup + (ALPHA * loss_unsup) + (GAMMA * aux_class_loss)
-
-#             loss.backward()
-#             optimizer.step()
-
-#             # ---------------------------------------------------------
-#             # 4. Monitoring
-#             # ---------------------------------------------------------
-#             total_loss += loss.item()
-#             total_sup += loss_sup.item()
-#             total_class_loss += aux_class_loss.item()
-#             total_batches += 1
-
-#             # Calcul Accuracy (sur le batch labeled courant)
-#             with torch.no_grad():
-#                 preds = torch.argmax(logits, dim=1)
-#                 acc = (preds == y_labeled).float().mean()
-#                 total_acc += acc.item()
-
-#             # Log fréquent (tous les 50 batches)
-#             if total_batches % 50 == 0:
-#                 print(f"   [Batch {total_batches}] Loss: {loss.item():.1f} | "
-#                       f"Sup: {loss_sup.item():.1f} | "
-#                       f"Class(Aux): {aux_class_loss.item():.3f} | "
-#                       f"Acc: {acc.item():.1%}")
-
-#         # --- Fin de l'époque ---
-#         avg_loss = total_loss / total_batches
-#         avg_acc = total_acc / total_batches
-#         avg_class_loss = total_class_loss / total_batches
-        
-#         print(f"===> Epoch {epoch+1}/{EPOCHS} terminée.")
-#         print(f"     Avg Loss: {avg_loss:.2f} | Avg Class Loss: {avg_class_loss:.4f}")
-#         print(f"     Global Accuracy: {avg_acc:.2%}")
-
-#         # Sauvegarde d'images de test (sur données non vues/non supervisées)
-#         with torch.no_grad():
-#             test_x = x_unlabeled[:8] # On prend 8 images du dernier batch unlabeled
-#             recon_x, _, _, _, _, _ = model(test_x)
-#             # Concaténation : Ligne du haut = Originale / Ligne du bas = Reconstruction
-#             comparison = torch.cat([test_x, recon_x])
-#             save_image(comparison.cpu(), f"results/recon_epoch_{epoch+1}.png", nrow=8)
-
-#         # Sauvegarde du modèle
-#         torch.save(model.state_dict(), "ccvae_haircolor.pth")
-#         print("     Modèle sauvegardé.\n")
-
-# if __name__ == "__main__":
-#     train()
