@@ -75,5 +75,5 @@ To explore the different models, tasks, probing experiments we realized, please 
 This project was developed for the MVA course on Introduction to Graphical Models and Probabilistic Generative Models by:
 
 * **Farouk Yartaoui**
-* **Elmehdi Nezahi**
+* **El Mehdi Nezahi**
 * **Rida Assalouh**
