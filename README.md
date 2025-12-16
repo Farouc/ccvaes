@@ -33,6 +33,7 @@ pip install -r requirements.txt
 
 The project is organized into distinct directories for each task, ensuring clear separation between classification and regression experiments, reflecting the CCVAE's application across different supervised settings.
 
+```text
 CCVAES/
 ├── ccvae_env/                      # Python environment / dependencies
 │
@@ -61,7 +62,7 @@ CCVAES/
     ├── demo_ccvae.ipynb
     ├── demo_multilabel.ipynb
     └── demo_regression.ipynb
-
+```
 
 
 ---
