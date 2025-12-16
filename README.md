@@ -6,29 +6,25 @@ This project is part of the MVA course on **Introduction to Graphical Models and
 
 ## 🚀 Getting Started
 
-### Prerequisites
+1.  **Clone the repository:**
+    
+```bash
+git clone https://github.com/Farouc/ccvaes.git
+cd CCVAES
+```
+
+2.  **Set up the environment:**
 
 ```bash
+conda create -n ccvae_env python=3.11.9
+conda activate ccvae_env
 pip install -r requirements.txt
 ```
 
-### Installation
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Farouc/ccvaes.git
-    cd CCVAES
-    ```
-
-2.  **Set up the environment:**
-    ```bash
-    conda create -n ccvae_env python=3.11.9
-    conda activate ccvae_env
-    pip install -r requirements.txt
-    ```
-
 3.  **Data Setup:**
+    
     * **Classification:** Download the [CartoonSet](https://google.github.io/cartoonset/)  dataset  and place the images in `data/cartoonset10k/cartoonset10k`.
+    
     * **Regression:** Download the [UTKFace](https://www.kaggle.com/datasets/jangedoo/utkface-new/data) dataset and place the images in `data/UTKFace`.
 
 ---
