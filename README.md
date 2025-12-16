@@ -1,6 +1,6 @@
-# CCVAE-Probing-Benchmark: Conditional VAE for Disentangled Representation and Downstream Tasks
+# DO CCVAES PRACTICE WHAT THEY PREACH? 
 
-This project is part of the MVA course on **Introduction to Graphical Models and Probabilistic Generative Models**. It implements and benchmarks a **Conditional Contrastive Variational Autoencoder (CCVAE)** framework designed to learn disentangled representations for image data, focusing on applying the learned features to downstream tasks: One-label Classification, Multi-label Classification and Regression.
+This project is part of the MVA course on **Introduction to Graphical Models and Probabilistic Generative Models**. It implements the [Capturing Label Characteristics in VAEs](https://arxiv.org/pdf/2006.10102) paper, on three different tasks, one-label classification, multi-label classification and extends it to regression, by introducing the C3VAE framework. Our project also aims at experimenting with the CCVAEs to tackle information leakage, capturing new characteristics, and enforcing label-entanglement in the latent space.  
 
 ---
 
