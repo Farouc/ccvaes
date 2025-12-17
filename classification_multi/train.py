@@ -23,14 +23,14 @@ ATTRIBUTES = ["hair_color", "face_color"]
 # Training hyperparameters
 BATCH_SIZE = 128
 LR = 1e-4
-EPOCHS = 110
+EPOCHS = 400
 LABELED_RATIO = 0.5
 K_SAMPLES = 10
 
 # Latent dimensions and loss weights
 Z_C_DIMS = [16, 16]      # One z_c block per attribute
 Z_NOT_C_DIM = 32        # Shared nuisance / style latent
-GAMMA = 30.0            # Auxiliary classification weight
+GAMMA = 50.0            # Auxiliary classification weight
 ALPHA = 1.0             # Unsupervised loss weight
 
 # ------------------------------------------------------------
@@ -64,7 +64,7 @@ def train():
 
     print("Loading Cartoon multi-label dataset...")
     dataset = CartoonMultiLabelDataset(
-        root_dir="../data/cartoonset10k/cartoonset10k",
+        root_dir="data/cartoonset10k/cartoonset10k",
         target_attributes=ATTRIBUTES,
         transform=transform,
     )
@@ -221,7 +221,7 @@ def train():
                     nrow=8,
                 )
 
-            torch.save(model.state_dict(), "ccvae_multilabel_r.pth")
+            torch.save(model.state_dict(), "ccvae_multilabel_new_2.pth")
 
 
 if __name__ == "__main__":

@@ -73,18 +73,18 @@ class CCVAE(nn.Module):
         # 3. Attribute classifiers and conditional priors
         # --------------------------------------------------
         self.classifiers = nn.ModuleList()
-        self.prior_embeddings = nn.ModuleList()
-        self.prior_mu = nn.ModuleList()
-        self.prior_logvar = nn.ModuleList()
+        self.priors_embedding = nn.ModuleList()
+        self.priors_mu = nn.ModuleList()
+        self.priors_logvar = nn.ModuleList()
 
         for dim_z, num_cls in zip(z_c_dims, num_classes_list):
             # q(y_i | z_c_i)
             self.classifiers.append(nn.Linear(dim_z, num_cls))
 
             # p(z_c_i | y_i)
-            self.prior_embeddings.append(nn.Linear(num_cls, 32))
-            self.prior_mu.append(nn.Linear(32, dim_z))
-            self.prior_logvar.append(nn.Linear(32, dim_z))
+            self.priors_embedding.append(nn.Linear(num_cls, 32))
+            self.priors_mu.append(nn.Linear(32, dim_z))
+            self.priors_logvar.append(nn.Linear(32, dim_z))
 
     # --------------------------------------------------
     # Reparameterization trick
@@ -146,10 +146,11 @@ class CCVAE(nn.Module):
                 num_cls = self.num_classes_list[i]
 
                 y_onehot = F.one_hot(y_i, num_classes=num_cls).float()
-                embed = F.relu(self.prior_embeddings[i](y_onehot))
+                embed = F.relu(self.priors_embedding[i](y_onehot))
 
-                p_mu = self.prior_mu[i](embed)
-                p_logvar = self.prior_logvar[i](embed)
+
+                p_mu = self.priors_mu[i](embed)
+                p_logvar = self.priors_logvar[i](embed)
 
                 prior_mu_list.append(p_mu)
                 prior_logvar_list.append(p_logvar)

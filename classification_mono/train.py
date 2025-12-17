@@ -25,15 +25,15 @@ from losses.ccvae_total_loss import ccvae_supervised_loss
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Training hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 LR = 1e-4
-EPOCHS = 70
+EPOCHS = 100
 LABELED_RATIO = 0.5
 K_SAMPLES = 10
 
 # Loss weights
 ALPHA = 1.0    # unsupervised ELBO weight
-GAMMA = 20.0   # auxiliary classification loss weight
+GAMMA = 5.0   # auxiliary classification loss weight
 
 # ------------------------------------------------------------
 # 2. LOSS SELECTION
@@ -43,7 +43,7 @@ LOSS_MODE = "ccvae_elbo"
 #   "ccvae_elbo"
 #   "ccvae_contrastive"
 
-CONTRASTIVE_WEIGHT = 5.0   # used only if ccvae_contrastive
+CONTRASTIVE_WEIGHT = 50   # used only if ccvae_contrastive
 CONTRASTIVE_ON = "mu"      # "mu" or "z" (currently only "mu" implemented)
 
 # ------------------------------------------------------------
@@ -106,7 +106,7 @@ def train():
 
     print("Loading CartoonSet10k...")
     dataset = CartoonHairColorDataset(
-        root_dir="../data/cartoonset10k/cartoonset10k",
+        root_dir="data/cartoonset10k/cartoonset10k",
         transform=transform,
     )
     num_classes = dataset.num_classes
@@ -256,7 +256,7 @@ def train():
                 nrow=8,
             )
 
-        torch.save(model.state_dict(), "ccvae_haircolor.pth")
+        torch.save(model.state_dict(), "ccvae_haircolor_baseeeeeeeeeee.pth")
         print(" Model saved.\n")
 
 
